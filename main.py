@@ -26,7 +26,7 @@ adult_content_labels = [
 async def health_check():
     return {"message": "ok from image check service"}
 
-@app.head("/")
+@app.head("/health")
 async def head():
     return JSONResponse(content={}, status_code=200)
 
