@@ -95,3 +95,7 @@ async def detect_nudity(file: UploadFile = File(...)):
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
         return JSONResponse(content={"error": f"An unexpected error occurred: {str(e)}"}, status_code=500)
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8083)  # Specify port here
