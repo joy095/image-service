@@ -28,7 +28,7 @@ async def health_check():
 
 @app.head("/")
 async def head():
-    return JSONResponse(status_code=200)
+    return JSONResponse(content={}, status_code=200)
 
 @app.get("/", response_class=HTMLResponse)
 async def main():
