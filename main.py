@@ -4,6 +4,7 @@ from nudenet import NudeDetector
 import shutil
 import os
 from PIL import Image
+import uvicorn
 
 app = FastAPI()
 
@@ -34,9 +35,7 @@ async def head():
 async def main():
     return """
     <html>
-        <head>
-            <title>Upload Image</title>
-        </head>
+        <head><title>Upload Image</title></head>
         <body>
             <h2>Upload an image to check for nudity:</h2>
             <form action="/detect-nudity/" enctype="multipart/form-data" method="post">
@@ -53,7 +52,7 @@ async def detect_nudity(file: UploadFile = File(...)):
     try:
         # Validate the file type
         if not file.content_type.startswith("image/"):
-            return JSONResponse(content={"error": "Uploaded file is not an image."}, status_code=400)
+            return JSONResponse(content={"is_adult_content": False}, status_code=400)
 
         # Save the uploaded file temporarily
         with open(temp_file_path, "wb") as temp_file:
@@ -64,38 +63,24 @@ async def detect_nudity(file: UploadFile = File(...)):
             Image.open(temp_file_path).verify()
         except Exception:
             os.remove(temp_file_path)
-            return JSONResponse(content={"error": "Uploaded file is not a valid image."}, status_code=400)
+            return JSONResponse(content={"is_adult_content": False}, status_code=400)
 
-        # Classify the image using the full-size NudeNet detector
+        # Classify the image
         result = detector.detect(temp_file_path)
 
-        # Print the result to debug and inspect its structure
-        print(result)
+        # Check for adult content
+        for item in result:
+            if item.get("class") in adult_content_labels and item.get("score", 0) > 0.2:
+                os.remove(temp_file_path)
+                return JSONResponse(content={"is_adult_content": True}, status_code=200)
 
-        # Check for adult content labels in the result
-        if isinstance(result, list):  # Check if the result is a list of classifications
-            for item in result:
-                # Ensure the class and score exist in the item
-                if "class" in item and "score" in item:
-                    # Check if the class is in the adult_content_labels and the score is above threshold
-                    if item["class"] in adult_content_labels and item["score"] > 0.5:
-                        os.remove(temp_file_path)
-                        return JSONResponse(content={"error": "Adult content detected in the image."}, status_code=400)
-
-        # Clean up the temporary file
         os.remove(temp_file_path)
-
-        return {
-            "filename": file.filename,
-            "full_classification": result
-        }
+        return JSONResponse(content={"is_adult_content": False}, status_code=200)
 
     except Exception as e:
-        # Handle any unexpected errors
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-        return JSONResponse(content={"error": f"An unexpected error occurred: {str(e)}"}, status_code=500)
-
+        return JSONResponse(content={"is_adult_content": False}, status_code=500)
 
 if __name__ == "__main__":
-    uvicorn.run(app, port=8083)  # Specify port here
+    uvicorn.run(app, port=8083)
