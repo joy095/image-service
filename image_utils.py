@@ -6,35 +6,27 @@ from config import settings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def crop_image_to_aspect_ratio(image: Image.Image, target_aspect_ratio: float = settings.CROPPED_ASPECT_RATIO):
+def crop_image_to_square(image: Image.Image, target_size: int = 512):
     """
-    Crops an image to the target aspect ratio, centering the crop.
+    Crops the center of the image to a square, then resizes it to target_size x target_size.
     """
-    original_width, original_height = image.size
-    original_aspect_ratio = original_width / original_height
+    width, height = image.size
+    min_side = min(width, height)
 
-    if abs(original_aspect_ratio - target_aspect_ratio) < 0.01: # Check if already close
-        logger.info("Image aspect ratio is close to target, no cropping needed.")
-        return image
+    # Calculate coordinates to center crop the square
+    left = (width - min_side) // 2
+    top = (height - min_side) // 2
+    right = left + min_side
+    bottom = top + min_side
 
-    if original_aspect_ratio > target_aspect_ratio:
-        # Original is wider than target, crop width
-        new_width = int(original_height * target_aspect_ratio)
-        left = (original_width - new_width) // 2
-        top = 0
-        right = left + new_width
-        bottom = original_height
-        logger.info(f"Cropping width: ({left}, {top}, {right}, {bottom})")
-        return image.crop((left, top, right, bottom))
-    else:
-        # Original is taller or equal to target, crop height
-        new_height = int(original_width / target_aspect_ratio)
-        left = 0
-        top = (original_height - new_height) // 2
-        right = original_width
-        bottom = top + new_height
-        logger.info(f"Cropping height: ({left}, {top}, {right}, {bottom})")
-        return image.crop((left, top, right, bottom))
+    logger.info(f"Cropping square: ({left}, {top}, {right}, {bottom})")
+    cropped = image.crop((left, top, right, bottom))
+
+    # Resize to desired size (e.g., 512x512)
+    resized = cropped.resize((target_size, target_size), Image.LANCZOS)
+    logger.info(f"Resized cropped image to {target_size}x{target_size}")
+    return resized
+
 
 def convert_to_webp(image: Image.Image):
     """Converts a PIL Image object to WebP format in a BytesIO object."""
