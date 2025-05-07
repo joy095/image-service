@@ -29,6 +29,7 @@ if not os.path.exists(model_path):
     # Consider raising an exception here if nudity detection is mandatory
 else:
     try:
+        # Initialize the detector with the model path and inference resolution
         detector = NudeDetector(model_path=model_path, inference_resolution=640)
         print("NudeNet detector initialized successfully.")
     except Exception as e:
@@ -37,10 +38,11 @@ else:
         detector = None # Ensure detector is None on failure
 
 
-# List of adult content labels to check for
+# List of adult content labels to check for (based on NudeNet output)
 adult_content_labels = [
     "BUTTOCKS_EXPOSED", "FEMALE_BREAST_EXPOSED", "FEMALE_GENITALIA_EXPOSED",
-    "ANUS_EXPOSED", "MALE_GENITALIA_EXPOSED"
+    "ANUS_EXPOSED", "MALE_GENITALIA_EXPOSED", "FEMALE_BREAST_AREOLA", # Added more specific labels
+    "FEMALE_GENITALIA", "MALE_GENITALIA"
 ]
 
 # --- Health Check Endpoints (from your original code) ---
@@ -76,11 +78,12 @@ async def main_form():
     """
 
 # --- Original Nudity Detection Endpoint (Optional - keep or remove) ---
-# This endpoint does NOT require JWT authentication
+# This endpoint does NOT require JWT authentication and is separate from the upload process.
+# It performs the *same* nudity check logic as the upload route, but is a standalone endpoint.
 @app.post("/detect-nudity/")
 async def detect_nudity(file: UploadFile = File(...)):
     """Checks an image for adult content using NudeNet."""
-    temp_file_path = f"temp_{uuid.uuid4().hex}_{file.filename}" # Use uuid for uniqueness
+    temp_file_path = f"temp_detect_{uuid.uuid4().hex}_{file.filename}" # Use uuid for uniqueness
     is_adult = False
     try:
         # Validate the file type
@@ -112,13 +115,13 @@ async def detect_nudity(file: UploadFile = File(...)):
                     is_adult = True
                     break # Found adult content, no need to check further
         else:
-             print("NudeNet detector not available. Skipping nudity detection.")
+             print("NudeNet detector not available in /detect-nudity/. Skipping nudity detection.")
 
 
         return JSONResponse(content={"is_adult_content": is_adult}, status_code=200)
 
     except Exception as e:
-        print(f"Error during nudity detection: {e}")
+        print(f"Error during nudity detection in /detect-nudity/: {e}")
         return JSONResponse(content={"is_adult_content": False, "detail": "Internal server error."}, status_code=500)
     finally:
         # Ensure temporary file is removed
@@ -129,112 +132,86 @@ async def detect_nudity(file: UploadFile = File(...)):
 @app.post("/upload-image/")
 async def upload_image(
     file: UploadFile = File(...),
-    # This is where the get_current_user_id dependency is used.
-    # FastAPI will call get_current_user_id before running this function.
-    # If get_current_user_id succeeds, its return value (the user_id string)
-    # is passed into the 'user_id' parameter of this function.
-    # If get_current_user_id raises an HTTPException (like 401), this function
-    # will not be called, and FastAPI will return the HTTPException response.
     user_id: str = Depends(get_current_user_id)
 ):
     """
-    Uploads an image, checks for nudity, processes it (crop, webp),
-    uploads to R2, and saves the link to the database.
-    Requires a valid JWT in the Authorization: Bearer header.
-    The user_id from the JWT will be available in the user_id parameter.
+    Upload an image, detect nudity, process (crop + webp), upload to R2, save link to DB.
     """
-    temp_file_path = None # Initialize outside try block
+    temp_file_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
     try:
         # 1. Validate file type
         if not file.content_type or not file.content_type.startswith("image/"):
-             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file type. Only images are allowed.")
+            raise HTTPException(status_code=400, detail="Invalid file type. Only images are allowed.")
 
-        # 2. Save file temporarily for processing (NudeNet and Pillow might need a file path)
-        # Ensure the temp directory exists if not saving in current dir
-        temp_file_path = f"temp_{uuid.uuid4().hex}_{file.filename}"
-        with open(temp_file_path, "wb") as temp_file:
-            shutil.copyfileobj(file.file, temp_file)
+        # 2. Save uploaded file temporarily
+        with open(temp_file_path, "wb") as f_out:
+            shutil.copyfileobj(file.file, f_out)
 
-        # 3. Verify image file is valid
+        # 3. Verify it's a valid image
         try:
-            img = Image.open(temp_file_path)
-            img.verify() # Verify the image file format is valid
-            img.close() # Close after verification
+            Image.open(temp_file_path).verify()
         except Exception:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or corrupted image file.")
+            raise HTTPException(status_code=400, detail="Invalid or corrupted image file.")
 
-        # 4. Check for adult content using NudeNet (if detector is available)
+        # 4. Nudity detection (block upload if adult content found)
+        # 4. Nudity detection (block upload if adult content found)
         if detector:
             try:
-                detection_result = detector.detect(temp_file_path)
-                for item in detection_result:
-                    if item.get("class") in adult_content_labels and item.get("score", 0) > 0.2:
-                        # If adult content is detected above threshold
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="Adult content detected in the image."
+                detections = detector.detect(temp_file_path)
+                print("Detections:", detections)  # Optional: for debugging
+
+                for item in detections:
+                    label = item.get("class")
+                    score = item.get("score", 0)
+
+                    if label in adult_content_labels and score > 0.2:
+                        print(f"Adult content detected: {label} ({score})")
+                        # Immediately return with HTTP 400
+                        return JSONResponse(
+                            status_code=400,
+                            content={"detail": f"Adult content detected: {label} ({score:.2f})"}
                         )
             except Exception as e:
-                 # Log the error but maybe don't block the upload unless critical
-                 print(f"Error during NudeNet detection: {e}")
-                 # Depending on policy, you might still want to block on detector error
-                 # raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error during nudity detection.")
-
+                print(f"NudeNet error: {e}")
+                raise HTTPException(status_code=500, detail="Error during nudity detection.")
         else:
-             print("NudeNet detector not available. Skipping nudity detection for upload.")
+            print("NudeNet detector not initialized. Skipping nudity check.")
 
 
-        # 5. Image Processing (Crop and Convert to WebP)
+        # 5. Image processing (crop + convert to webp)
         try:
-            original_image = Image.open(temp_file_path)
-            cropped_image = crop_image_to_aspect_ratio(original_image, settings.CROPPED_ASPECT_RATIO)
-            webp_image_bytes = convert_to_webp(cropped_image)
-            original_image.close() # Close original PIL image
-            cropped_image.close() # Close cropped PIL image
+            image = Image.open(temp_file_path)
+            cropped = crop_image_to_aspect_ratio(image, settings.CROPPED_ASPECT_RATIO)
+            webp_bytes = convert_to_webp(cropped)
+            image.close()
+            cropped.close()
         except Exception as e:
-             print(f"Error during image processing: {e}")
-             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to process image.")
+            print(f"Image processing error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to process image.")
 
-        # 6. Upload to Cloudflare R2
+        # 6. Upload to R2
         try:
-            # Generate a unique filename for R2, using the user_id in the path
-            r2_object_name = f"uploads/{user_id}/{uuid.uuid4().hex}.webp"
-            r2_url = upload_file_to_r2(webp_image_bytes, r2_object_name)
+            r2_path = f"uploads/{user_id}/{uuid.uuid4().hex}.webp"
+            r2_url = upload_file_to_r2(webp_bytes, r2_path)
             if not r2_url:
-                 # Handle case where public URL base isn't configured
-                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="R2 upload successful, but public URL could not be constructed.")
+                raise HTTPException(status_code=500, detail="Image uploaded but URL construction failed.")
         except Exception as e:
-             print(f"Error during R2 upload: {e}")
-             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to upload image to storage.")
+            print(f"R2 upload error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to upload image to storage.")
 
-
-        # 7. Save link to PostgreSQL database
+        # 7. Save to DB
         try:
-            # Pass the extracted user_id to the database function
             save_image_record(user_id=user_id, r2_url=r2_url)
         except Exception as e:
-             print(f"Error saving R2 URL to database: {e}")
-             # Consider if you should roll back the R2 upload here or just log the DB error
-             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save image information to database.")
+            print(f"DB save error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to save image info to database.")
 
-        # 8. Return success response
-        return JSONResponse(
-            content={"message": "Image uploaded and processed successfully", "r2_url": r2_url},
-            status_code=status.HTTP_201_CREATED # Use 201 Created for successful resource creation
-        )
+        # 8. Success
+        return JSONResponse(content={"message": "Upload successful", "r2_url": r2_url}, status_code=201)
 
-    except HTTPException as http_exc:
-        # Re-raise FastAPI HTTPExceptions
-        raise http_exc
-    except Exception as e:
-        # Catch any other unexpected errors
-        print(f"An unexpected error occurred: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An unexpected error occurred.")
     finally:
-        # Ensure temporary file is removed
-        if temp_file_path and os.path.exists(temp_file_path):
+        if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-            print(f"Cleaned up temp file: {temp_file_path}")
 
 # Optional: Add a shutdown event to close the database pool
 @app.on_event("shutdown")
