@@ -5,3 +5,4 @@ pillow
 nudenet
 python-jose[cryptography]
 python-dotenv
+psycopg2
