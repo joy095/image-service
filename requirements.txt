@@ -3,4 +3,4 @@ uvicorn
 python-multipart
 pillow
 nudenet
-confluent-kafka
+python-jose[cryptography]
