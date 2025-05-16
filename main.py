@@ -14,7 +14,7 @@ from config import settings
 from auth import get_current_user_id
 from database import save_image_record, db_pool # Import db_pool to close on shutdown
 from r2_storage import upload_file_to_r2
-from image_utils import crop_image_to_square, convert_to_webp
+from image_utils import convert_to_webp, crop_image_to_aspect_ratio
 
 app = FastAPI()
 
@@ -181,7 +181,7 @@ async def upload_image(
         # 5. Image processing (crop + convert to webp)
         try:
             image = Image.open(temp_file_path)
-            square = crop_image_to_square(image)  # You can replace 512 with settings.IMAGE_SIZE if you want it configurable
+            square = crop_image_to_aspect_ratio(image)
             webp_bytes = convert_to_webp(square)
             image.close()
             square.close()
