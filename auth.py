@@ -4,41 +4,18 @@ from typing import Optional
 from fastapi import Depends, HTTPException, status, Header # Import Header
 from jose import JWTError, jwt # Using python-jose library
 
-# Import your settings object
-# This assumes you have a config.py or settings.py file
-# where you define your settings, likely loading from environment variables.
-# Make sure 'config' is the correct module name if your file is named differently.
 from config import settings
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Configuration loaded from settings ---
-# Load the secret key and algorithm from the settings object
-# These should be defined in your config.py using os.getenv or pydantic_settings
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
 
 # --- Dependency to get the current user ID from the JWT ---
 # Removed dependency on OAuth2BearerToken
 async def get_current_user_id(authorization: str = Header(None)) -> str:
-    """
-    Dependency function to validate the JWT token from the Authorization header
-    and extract the user_id.
-
-    Args:
-        authorization: The full Authorization header string (e.g., "Bearer <token>").
-                       FastAPI injects this automatically using Header().
-
-    Returns:
-        The user_id (as a string) from the JWT payload if the token is valid.
-
-    Raises:
-        HTTPException: If the Authorization header is missing/invalid,
-                       the token is invalid/expired, or the user_id is missing
-                       in the payload.
-    """
+   
     logger.info("Attempting to validate JWT token from Authorization header.")
 
     # Check if the Authorization header is present and in the correct format
@@ -60,14 +37,11 @@ async def get_current_user_id(authorization: str = Header(None)) -> str:
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # Decode the JWT token
-        # The payload is the dictionary inside the token
-        # jwt.decode automatically checks for expiry by default
+       
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         logger.info(f"JWT payload decoded: {payload}")
 
-        # Extract the user_id from the payload
-        # Based on your example payload, the user ID is under the 'user_id' key.
+     
         user_id: str = payload.get("user_id")
 
         if user_id is None:

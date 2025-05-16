@@ -8,9 +8,8 @@ class Settings:
     ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:admin123@host:5432/python_image") # Fallback DB URL
-    # Make sure this table exists in your DB: CREATE TABLE images (id SERIAL PRIMARY KEY, user_id INTEGER, r2_url VARCHAR(255), uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-    # You might need a 'users' table as well, depending on how your JWT is structured.
+    DATABASE_URL: str = os.getenv("DATABASE_URL")
+
 
     R2_ENDPOINT_URL: str = os.getenv("R2_ENDPOINT_URL")
     R2_ACCESS_KEY_ID: str = os.getenv("R2_ACCESS_KEY_ID")
