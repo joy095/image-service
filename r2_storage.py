@@ -1,6 +1,5 @@
 # r2_storage.py
 import boto3
-import os
 from config import settings
 import logging
 

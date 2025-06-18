@@ -1,10 +1,8 @@
 # database.py
 import logging
-import psycopg2
 from psycopg2 import pool
 from psycopg2 import sql
 from typing import List, Dict, Optional
-import datetime # Import datetime for type hinting uploaded_at
 
 from config import settings
 

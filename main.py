@@ -8,15 +8,20 @@ import os
 from PIL import Image
 import uvicorn
 import uuid # To generate unique filenames
-import io # To work with image data in memory
 from typing import List
 from pydantic import BaseModel # Import BaseModel for response models
 from datetime import datetime # Import datetime for the model
+from user_models import User
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("main")
+
 
 # Import your configuration and other modules
 from config import settings
 # Import the JWT authentication dependency
-from auth import get_current_user_id
+from auth import auth_middleware
 # Import the database functions (updated)
 from database import (
     save_image_record,
@@ -44,8 +49,9 @@ class ImageRecord(BaseModel):
     uploaded_at: datetime # Include uploaded_at as datetime
 
     # Pydantic Config for ORM mode or similar if needed, but dict should work
-    class Config:
-        orm_mode = True # Allows Pydantic to read data like an ORM object
+    model_config = {
+        "from_attributes": True
+    }
 
 
 # --- NudeNet Detector Initialization (from your original code) ---
@@ -153,19 +159,25 @@ async def detect_nudity(file: UploadFile = File(...)):
 @app.post("/upload-image/")
 async def upload_image(
     file: UploadFile = File(...),
-    user_id: str = Depends(get_current_user_id)
+    user: User = Depends(auth_middleware)
 ):
-    """
-    Upload an image, detect nudity, process (crop + webp), upload to R2, save info to DB.
-    """
+    if not user or not getattr(user, "id", None):
+        logger.error("User not found or unauthorized.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_id = str(user.id)
+    logger.info(f"=== UploadImage START - User {user_id} authenticated ===")
+
     object_uuid = uuid.uuid4().hex
-    # Use user_id in object name path for organization in R2
     object_name = f"uploads/{user_id}/{object_uuid}.webp"
     temp_file_path = f"temp_{object_uuid}_{file.filename}"
 
     try:
         if file.size > MAX_UPLOAD_SIZE_BYTES:
-            raise HTTPException(status_code=413, detail=f"File size exceeds the limit of {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f} MB.")
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds limit of {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f} MB."
+            )
 
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid file type. Only images are allowed.")
@@ -173,6 +185,7 @@ async def upload_image(
         with open(temp_file_path, "wb") as f_out:
             shutil.copyfileobj(file.file, f_out)
 
+        # Validate image
         try:
             img = Image.open(temp_file_path)
             img.verify()
@@ -180,6 +193,7 @@ async def upload_image(
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid or corrupted image file.")
 
+        # Nudity detection
         if detector:
             try:
                 detections = detector.detect(temp_file_path)
@@ -187,18 +201,17 @@ async def upload_image(
                     label = item.get("class")
                     score = item.get("score", 0)
                     if label in adult_content_labels and score > 0.2:
-                         raise HTTPException(
-                              status_code=400,
-                              detail=f"Adult content detected: {label} ({score:.2f})"
-                         )
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Adult content detected: {label} ({score:.2f})"
+                        )
             except Exception as e:
-                print(f"NudeNet error: {e}")
+                logger.error(f"NudeNet error: {e}")
                 raise HTTPException(status_code=500, detail="Error during nudity detection.")
         else:
-            print("NudeNet detector not initialized. Skipping nudity check.")
+            logger.warning("NudeNet detector not initialized. Skipping nudity check.")
 
-
-        webp_bytes = None
+        # Image processing
         try:
             image = Image.open(temp_file_path)
             processed_image = crop_image_to_aspect_ratio(image)
@@ -206,55 +219,52 @@ async def upload_image(
             image.close()
             processed_image.close()
         except Exception as e:
-            print(f"Image processing error: {e}")
+            logger.error(f"Image processing error: {e}")
             raise HTTPException(status_code=500, detail="Failed to process image.")
 
-        r2_url = None
+        # Upload to R2
         try:
-            if webp_bytes is None:
-                 raise Exception("Processed image bytes not available for upload.")
             r2_url = upload_file_to_r2(webp_bytes, object_name)
             if not r2_url:
-                 raise HTTPException(status_code=500, detail="Image uploaded but URL construction failed.")
+                raise HTTPException(status_code=500, detail="Image uploaded but URL construction failed.")
         except Exception as e:
-            print(f"R2 upload error: {e}")
+            logger.error(f"R2 upload error: {e}")
             raise HTTPException(status_code=500, detail="Failed to upload image to storage.")
 
-        # Save to DB - pass object_name and get UUID string back
-        image_uuid = None
+        # Save to DB
         try:
             image_uuid = save_image_record(user_id=user_id, r2_url=r2_url, object_name=object_name)
-            if image_uuid is None:
-                 raise Exception("Database record was not created.")
+            if not image_uuid:
+                raise Exception("Database record was not created.")
         except Exception as e:
-            print(f"DB save error: {e}")
-            # Consider R2 cleanup here if DB save fails
+            logger.error(f"DB save error: {e}")
             try:
-                 if object_name:
-                     # Attempt to delete the file uploaded to R2 if DB save failed
-                     delete_file_from_r2(object_name)
-                     print(f"Cleaned up R2 object {object_name} after DB save failure.")
+                delete_file_from_r2(object_name)
+                logger.info(f"Cleaned up R2 object {object_name} after DB save failure.")
             except Exception as cleanup_e:
-                 print(f"CRITICAL: Failed to clean up R2 object {object_name} after DB save failure: {cleanup_e}")
-
+                logger.critical(f"Failed to clean up R2 object {object_name}: {cleanup_e}")
             raise HTTPException(status_code=500, detail="Failed to save image info to database.")
 
-        # Success - return UUID as string
-        return JSONResponse(content={"message": "Upload successful", "image_id": image_uuid, "r2_url": r2_url}, status_code=201)
+        return JSONResponse(
+            content={"message": "Upload successful", "image_id": image_uuid, "r2_url": r2_url},
+            status_code=201
+        )
 
-    except HTTPException as he:
-        raise he
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"An unhandled error occurred during image upload: {e}")
+        logger.error(f"Unhandled error during upload: {e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
 
+
 # --- GET User's Images ---
 @app.get("/images/me/", response_model=List[ImageRecord])
-async def get_my_images(user_id: str = Depends(get_current_user_id)):
+async def get_my_images(user_id: str = Depends(auth_middleware)):
+    print(f"Getting images for user {user_id}")
     """
     Get all image records for the authenticated user.
     """
@@ -269,7 +279,7 @@ async def get_my_images(user_id: str = Depends(get_current_user_id)):
 @app.get("/images/{image_id}", response_model=ImageRecord)
 async def get_image_by_id(
     image_id: str = Path(..., description="The UUID of the image to retrieve"),
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(auth_middleware)
 ):
     """
     Get a specific image record by UUID for the authenticated user.
@@ -291,7 +301,7 @@ async def get_image_by_id(
 async def delete_image(
     # image_id is now a string (UUID)
     image_id: str = Path(..., description="The UUID of the image to delete"),
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(auth_middleware)
 ):
     """
     Delete a specific image record and the corresponding file from storage for the authenticated user.
@@ -353,7 +363,7 @@ async def update_image(
     # image_id is now a string (UUID)
     image_id: str = Path(..., description="The UUID of the image to update"),
     file: UploadFile = File(...), # New file to replace the old one
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(auth_middleware)
 ):
     """
     Update a specific image record by replacing the image file and updating the storage URL/object_name.
