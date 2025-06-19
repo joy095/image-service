@@ -100,13 +100,13 @@ async def main_form():
              <h2>Upload an image (requires auth):</h2>
              <p>This form is for testing. Requires Authorization: Bearer [token] header.</p>
              <form action="/upload-image/" enctype="multipart/form-data" method="post">
-                 <input name="file" type="file" accept="image/*" required>
+                 <input name="image" type="file" accept="image/*" required>
                  <input type="submit" value="Upload">
              </form>
              <br/>
               <h2>Check image for nudity (no auth required):</h2>
              <form action="/detect-nudity/" enctype="multipart/form-data" method="post">
-                 <input name="file" type="file" accept="image/*" required>
+                 <input name="image" type="file" accept="image/*" required>
                  <input type="submit" value="Check Nudity">
              </form>
               <br/>
@@ -118,17 +118,17 @@ async def main_form():
 
 # --- Original Nudity Detection Endpoint (Optional - keep or remove) ---
 @app.post("/detect-nudity/")
-async def detect_nudity(file: UploadFile = File(...)):
+async def detect_nudity(image: UploadFile = File(...)):
     """Checks an image for adult content using NudeNet."""
     # This endpoint remains unchanged as it doesn't interact with the DB/Auth
-    temp_file_path = f"temp_detect_{uuid.uuid4().hex}_{file.filename}"
+    temp_file_path = f"temp_detect_{uuid.uuid4().hex}_{image.filename}"
     is_adult = False
     try:
-        if not file.content_type or not file.content_type.startswith("image/"):
+        if not image.content_type or not image.content_type.startswith("image/"):
              return JSONResponse(content={"is_adult_content": False, "detail": "Invalid file type."}, status_code=400)
 
         with open(temp_file_path, "wb") as temp_file:
-             shutil.copyfileobj(file.file, temp_file)
+             shutil.copyfileobj(image.file, temp_file)
 
         try:
              img = Image.open(temp_file_path)
@@ -158,7 +158,7 @@ async def detect_nudity(file: UploadFile = File(...)):
 # --- Image Upload Endpoint (Requires JWT Authentication) ---
 @app.post("/upload-image/")
 async def upload_image(
-    file: UploadFile = File(...),
+    image: UploadFile = File(...),
     user: User = Depends(auth_middleware)
 ):
     if not user or not getattr(user, "id", None):
@@ -170,20 +170,20 @@ async def upload_image(
 
     object_uuid = uuid.uuid4().hex
     object_name = f"uploads/{user_id}/{object_uuid}.webp"
-    temp_file_path = f"temp_{object_uuid}_{file.filename}"
+    temp_file_path = f"temp_{object_uuid}_{image.filename}"
 
     try:
-        if file.size > MAX_UPLOAD_SIZE_BYTES:
+        if image.size > MAX_UPLOAD_SIZE_BYTES:
             raise HTTPException(
                 status_code=413,
                 detail=f"File size exceeds limit of {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f} MB."
             )
 
-        if not file.content_type or not file.content_type.startswith("image/"):
+        if not image.content_type or not image.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid file type. Only images are allowed.")
 
         with open(temp_file_path, "wb") as f_out:
-            shutil.copyfileobj(file.file, f_out)
+            shutil.copyfileobj(image.file, f_out)
 
         # Validate image
         try:
@@ -232,12 +232,15 @@ async def upload_image(
             raise HTTPException(status_code=500, detail="Failed to upload image to storage.")
 
         # Save to DB
+        logger.info("Attempting to save image record to DB.")
         try:
             image_uuid = save_image_record(user_id=user_id, r2_url=r2_url, object_name=object_name)
+            logger.info(f"Result from save_image_record: {image_uuid}") # <-- ADD THIS LOG
             if not image_uuid:
-                raise Exception("Database record was not created.")
+                logger.error("save_image_record returned a falsey value (e.g., None or empty UUID).") # <-- ADD THIS LOG
+                raise Exception("Database record was not created (save_image_record returned falsey).") # Updated message for clarity
         except Exception as e:
-            logger.error(f"DB save error: {e}")
+            logger.error(f"DB save error during save_image_record call: {e}") # Updated message
             try:
                 delete_file_from_r2(object_name)
                 logger.info(f"Cleaned up R2 object {object_name} after DB save failure.")
@@ -245,8 +248,10 @@ async def upload_image(
                 logger.critical(f"Failed to clean up R2 object {object_name}: {cleanup_e}")
             raise HTTPException(status_code=500, detail="Failed to save image info to database.")
 
+        logger.info(f"Image UUID obtained for response: {image_uuid}") # <-- ADD THIS LOG
+
         return JSONResponse(
-            content={"message": "Upload successful", "image_id": image_uuid, "r2_url": r2_url},
+            content={"message": "Upload successful", "image_id": str(image_uuid), "r2_url": r2_url}, # Ensure image_id is a string for JSON
             status_code=201
         )
 
