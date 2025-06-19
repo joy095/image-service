@@ -1,26 +1,41 @@
 import os
 from dotenv import load_dotenv
+import base64
 
-load_dotenv() # Load environment variables from .env file
+load_dotenv()  # Load environment variables from .env file
+
+
+def must_getenv(key: str, allow_empty: bool = False) -> str:
+    value = os.getenv(key)
+    if value is None:
+        raise EnvironmentError(f"Missing required environment variable: {key}")
+    if not allow_empty and value.strip() == "":
+        raise EnvironmentError(f"Environment variable {key} is empty.")
+    return value
+
 
 class Settings:
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "fallback-secret-key") # Fallback is just for development, use .env
-    ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+    # Strict required variables
+    SECRET_KEY: bytes = base64.b64decode(must_getenv("SECRET_KEY"))
+    ALGORITHM: str = must_getenv("ALGORITHM")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(must_getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
 
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://postgres:admin123@host:5432/python_image") # Fallback DB URL
-    # Make sure this table exists in your DB: CREATE TABLE images (id SERIAL PRIMARY KEY, user_id INTEGER, r2_url VARCHAR(255), uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-    # You might need a 'users' table as well, depending on how your JWT is structured.
+    DATABASE_URL: str = must_getenv("DATABASE_URL")
 
-    R2_ENDPOINT_URL: str = os.getenv("R2_ENDPOINT_URL")
-    R2_ACCESS_KEY_ID: str = os.getenv("R2_ACCESS_KEY_ID")
-    R2_SECRET_ACCESS_KEY: str = os.getenv("R2_SECRET_ACCESS_KEY")
-    R2_BUCKET_NAME: str = os.getenv("R2_BUCKET_NAME")
-    R2_PUBLIC_URL_BASE: str = os.getenv("R2_PUBLIC_URL_BASE")
+    R2_ENDPOINT_URL: str = must_getenv("R2_ENDPOINT_URL")
+    R2_ACCESS_KEY_ID: str = must_getenv("R2_ACCESS_KEY_ID")
+    R2_SECRET_ACCESS_KEY: str = must_getenv("R2_SECRET_ACCESS_KEY")
+    R2_BUCKET_NAME: str = must_getenv("R2_BUCKET_NAME")
+    R2_PUBLIC_URL_BASE: str = must_getenv("R2_PUBLIC_URL_BASE")
 
-    MODEL_PATH: str = os.getenv("MODEL_PATH", os.path.join(os.path.dirname(__file__), "ai_models/640m.onnx"))
+    # Optional or fallback values
+    MODEL_PATH: str = os.getenv(
+        "MODEL_PATH",
+        os.path.join(os.path.dirname(__file__), "ai_models/640m.onnx")
+    )
 
-    # Image processing settings
-    CROPPED_ASPECT_RATIO: float = 1.0 # Example: 1.0 for a square (1:1)
+    # Constants / Defaults
+    CROPPED_ASPECT_RATIO: float = 1.0  # Example: 1.0 for square (1:1)
+
 
 settings = Settings()
