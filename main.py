@@ -1,69 +1,69 @@
 # main.py
-from fastapi import FastAPI, File, UploadFile, HTTPException, status, Depends, Path # Import Path
-from fastapi.responses import HTMLResponse, JSONResponse
-# Assuming nudenet, shutil, os, PIL, uvicorn, uuid, io are already imported
-from nudenet import NudeDetector
-import shutil
 import os
-from PIL import Image
-import uvicorn
-import uuid # To generate unique filenames
-from typing import List
-from pydantic import BaseModel # Import BaseModel for response models
-from datetime import datetime # Import datetime for the model
-from user_models import User
+import shutil
+import uuid
+import asyncio
+from io import BytesIO
+from datetime import datetime
 import logging
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("main")
+from fastapi import FastAPI, File, UploadFile, HTTPException, status, Depends, Path
+from fastapi.responses import HTMLResponse, JSONResponse
+from PIL import Image
+import uvicorn
+from pydantic import BaseModel
+from typing import List
+
+# Import aiofiles for asynchronous file operations
+import aiofiles
 
 
-# Import your configuration and other modules
+# Assuming these are imported from other modules and are synchronous 'def' functions
+# If any of these are already truly async (e.g., using aiobotocore, asyncpg),
+# you should remove the asyncio.to_thread() wrapper for them and just use 'await' directly.
+from nudenet import NudeDetector # NudeNet is typically synchronous
+from user_models import User # Assuming User model is defined
 from config import settings
-# Import the JWT authentication dependency
 from auth import auth_middleware
-# Import the database functions (updated)
 from database import (
     save_image_record,
-    db_pool,
+    db_pool, # db_pool itself doesn't need await, but operations using it do
     get_image_record_by_id,
     get_all_image_records_by_user_id,
     delete_image_record_by_id,
     update_image_record_url_by_id
 )
-# Import the r2_storage functions
 from r2_storage import upload_file_to_r2, delete_file_from_r2
-# Import image_utils functions
 from image_utils import convert_to_webp, crop_image_to_aspect_ratio
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("main")
 
 
 app = FastAPI()
 
 # --- Pydantic Model for Image Records ---
 class ImageRecord(BaseModel):
-    # ID is now a string (UUID)
     id: str
     user_id: str
     r2_url: str
-    object_name: str # Include object name in the model
-    uploaded_at: datetime # Include uploaded_at as datetime
+    object_name: str
+    uploaded_at: datetime
 
-    # Pydantic Config for ORM mode or similar if needed, but dict should work
     model_config = {
         "from_attributes": True
     }
 
 
-# --- NudeNet Detector Initialization (from your original code) ---
-# Define the model path from settings
+# --- NudeNet Detector Initialization ---
 model_path = settings.MODEL_PATH
-
-# Check if the model file exists, and initialize the detector if it does
 detector = None
 if not os.path.exists(model_path):
     print(f"WARNING: NudeNet model file not found at {model_path}. Nudity detection will be skipped.")
 else:
     try:
+        # NudeDetector initialization itself might be blocking, but it's usually done once at startup.
         detector = NudeDetector(model_path=model_path, inference_resolution=640)
         print("NudeNet detector initialized successfully.")
     except Exception as e:
@@ -72,7 +72,6 @@ else:
         detector = None
 
 
-# List of adult content labels to check for
 adult_content_labels = [
     "BUTTOCKS_EXPOSED", "FEMALE_BREAST_EXPOSED", "FEMALE_GENITALIA_EXPOSED",
     "ANUS_EXPOSED", "MALE_GENITALIA_EXPOSED", "FEMALE_BREAST_AREOLA",
@@ -80,6 +79,29 @@ adult_content_labels = [
 ]
 
 MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024 # 10 MB
+
+# --- Helper functions to run synchronous (blocking) code in a separate thread ---
+# These functions use asyncio.to_thread to prevent blocking the event loop.
+async def _run_blocking_pillow_op(func, *args, **kwargs):
+    """Runs a Pillow (PIL) operation in a separate thread."""
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+async def _run_blocking_nudity_detection(detector_instance, file_path):
+    """Runs NudeNet detection in a separate thread."""
+    return await asyncio.to_thread(detector_instance.detect, file_path)
+
+async def _run_blocking_r2_op(func, *args, **kwargs):
+    """Runs an R2 storage operation (upload/delete) in a separate thread."""
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+async def _run_blocking_db_op(func, *args, **kwargs):
+    """Runs a database operation in a separate thread."""
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+async def _run_blocking_os_op(func, *args, **kwargs):
+    """Runs an OS file system operation (like os.remove) in a separate thread."""
+    return await asyncio.to_thread(func, *args, **kwargs)
+
 
 # --- Health Check Endpoints ---
 @app.get("/health")
@@ -92,68 +114,70 @@ async def head():
 
 @app.get("/", response_class=HTMLResponse)
 async def main_form():
-     # Keep the form as is, it's just a simple test interface
-     return """
-     <html>
-         <head><title>Upload Image with Auth & Processing</title></head>
-         <body>
-             <h2>Upload an image (requires auth):</h2>
-             <p>This form is for testing. Requires Authorization: Bearer [token] header.</p>
-             <form action="/upload-image/" enctype="multipart/form-data" method="post">
-                 <input name="image" type="file" accept="image/*" required>
-                 <input type="submit" value="Upload">
-             </form>
-             <br/>
-              <h2>Check image for nudity (no auth required):</h2>
-             <form action="/detect-nudity/" enctype="multipart/form-data" method="post">
-                 <input name="image" type="file" accept="image/*" required>
-                 <input type="submit" value="Check Nudity">
-             </form>
-              <br/>
-              <h2>Image Management (requires auth):</h2>
-              <p>Use tools like curl or Postman for GET, PUT, DELETE on /images/me/ and /images/{image_id}</p>
-         </body>
-     </html>
-     """
+    return """
+    <html>
+        <head><title>Upload Image with Auth & Processing</title></head>
+        <body>
+            <h2>Upload an image (requires auth):</h2>
+            <p>This form is for testing. Requires Authorization: Bearer [token] header.</p>
+            <form action="/upload-image/" enctype="multipart/form-data" method="post">
+                <input name="image" type="file" accept="image/*" required>
+                <input type="submit" value="Upload">
+            </form>
+            <br/>
+            <h2>Check image for nudity (no auth required):</h2>
+            <form action="/detect-nudity/" enctype="multipart/form-data" method="post">
+                <input name="image" type="file" accept="image/*" required>
+                <input type="submit" value="Check Nudity">
+            </form>
+            <br/>
+            <h2>Image Management (requires auth):</h2>
+            <p>Use tools like curl or Postman for GET, PUT, DELETE on /images/me/ and /images/{image_id}</p>
+        </body>
+    </html>
+    """
 
-# --- Original Nudity Detection Endpoint (Optional - keep or remove) ---
+# --- Original Nudity Detection Endpoint (Made Async) ---
 @app.post("/detect-nudity/")
 async def detect_nudity(image: UploadFile = File(...)):
     """Checks an image for adult content using NudeNet."""
-    # This endpoint remains unchanged as it doesn't interact with the DB/Auth
     temp_file_path = f"temp_detect_{uuid.uuid4().hex}_{image.filename}"
     is_adult = False
     try:
         if not image.content_type or not image.content_type.startswith("image/"):
-             return JSONResponse(content={"is_adult_content": False, "detail": "Invalid file type."}, status_code=400)
+            return JSONResponse(content={"is_adult_content": False, "detail": "Invalid file type."}, status_code=400)
 
-        with open(temp_file_path, "wb") as temp_file:
-             shutil.copyfileobj(image.file, temp_file)
+        # Asynchronously read and write the file
+        file_content = await image.read()
+        async with aiofiles.open(temp_file_path, "wb") as temp_file:
+            await temp_file.write(file_content)
 
+        # Validate image (in thread)
         try:
-             img = Image.open(temp_file_path)
-             img.verify()
-             img.close()
+            img_to_verify = await _run_blocking_pillow_op(Image.open, temp_file_path)
+            await _run_blocking_pillow_op(lambda img: img.verify(), img_to_verify)
+            await _run_blocking_pillow_op(lambda img: img.close(), img_to_verify)
         except Exception:
             return JSONResponse(content={"is_adult_content": False, "detail": "Invalid image file."}, status_code=400)
 
+        # Nudity detection (in thread)
         if detector:
-             result = detector.detect(temp_file_path)
-             for item in result:
-                 if item.get("class") in adult_content_labels and item.get("score", 0) > 0.2:
-                      is_adult = True
-                      break
+            result = await _run_blocking_nudity_detection(detector, temp_file_path)
+            for item in result:
+                if item.get("class") in adult_content_labels and item.get("score", 0) > 0.2:
+                    is_adult = True
+                    break
         else:
-             print("NudeNet detector not available in /detect-nudity/. Skipping nudity detection.")
+            logger.warning("NudeNet detector not available in /detect-nudity/. Skipping nudity detection.")
 
         return JSONResponse(content={"is_adult_content": is_adult}, status_code=200)
 
     except Exception as e:
-        print(f"Error during nudity detection in /detect-nudity/: {e}")
+        logger.error(f"Error during nudity detection in /detect-nudity/: {e}")
         return JSONResponse(content={"is_adult_content": False, "detail": "Internal server error."}, status_code=500)
     finally:
         if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+            await _run_blocking_os_op(os.remove, temp_file_path)
 
 # --- Image Upload Endpoint (Requires JWT Authentication) ---
 @app.post("/upload-image/")
@@ -173,7 +197,10 @@ async def upload_image(
     temp_file_path = f"temp_{object_uuid}_{image.filename}"
 
     try:
-        if image.size > MAX_UPLOAD_SIZE_BYTES:
+        # 1. Asynchronously read the file content
+        file_content = await image.read()
+
+        if len(file_content) > MAX_UPLOAD_SIZE_BYTES:
             raise HTTPException(
                 status_code=413,
                 detail=f"File size exceeds limit of {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f} MB."
@@ -182,21 +209,22 @@ async def upload_image(
         if not image.content_type or not image.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid file type. Only images are allowed.")
 
-        with open(temp_file_path, "wb") as f_out:
-            shutil.copyfileobj(image.file, f_out)
+        # 2. Asynchronously save to temp file
+        async with aiofiles.open(temp_file_path, "wb") as f_out:
+            await f_out.write(file_content)
 
-        # Validate image
+        # 3. Validate image (in thread)
         try:
-            img = Image.open(temp_file_path)
-            img.verify()
-            img.close()
+            img_to_verify = await _run_blocking_pillow_op(Image.open, temp_file_path)
+            await _run_blocking_pillow_op(lambda img: img.verify(), img_to_verify)
+            await _run_blocking_pillow_op(lambda img: img.close(), img_to_verify)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid or corrupted image file.")
 
-        # Nudity detection
+        # 4. Nudity detection (in thread)
         if detector:
             try:
-                detections = detector.detect(temp_file_path)
+                detections = await _run_blocking_nudity_detection(detector, temp_file_path)
                 for item in detections:
                     label = item.get("class")
                     score = item.get("score", 0)
@@ -211,47 +239,49 @@ async def upload_image(
         else:
             logger.warning("NudeNet detector not initialized. Skipping nudity check.")
 
-        # Image processing
+        # 5. Image processing (in thread)
         try:
-            image = Image.open(temp_file_path)
-            processed_image = crop_image_to_aspect_ratio(image)
-            webp_bytes = convert_to_webp(processed_image)
-            image.close()
-            processed_image.close()
+            image_pil_for_processing = await _run_blocking_pillow_op(Image.open, temp_file_path)
+            processed_image = await _run_blocking_pillow_op(crop_image_to_aspect_ratio, image_pil_for_processing)
+            webp_bytes = await _run_blocking_pillow_op(convert_to_webp, processed_image)
+            
+            await _run_blocking_pillow_op(lambda img: img.close(), image_pil_for_processing)
+            await _run_blocking_pillow_op(lambda img: img.close(), processed_image)
         except Exception as e:
             logger.error(f"Image processing error: {e}")
             raise HTTPException(status_code=500, detail="Failed to process image.")
 
-        # Upload to R2
+        # 6. Upload to R2 (in thread)
         try:
-            r2_url = upload_file_to_r2(webp_bytes, object_name)
+            r2_url = await _run_blocking_r2_op(upload_file_to_r2, webp_bytes, object_name)
             if not r2_url:
                 raise HTTPException(status_code=500, detail="Image uploaded but URL construction failed.")
         except Exception as e:
             logger.error(f"R2 upload error: {e}")
             raise HTTPException(status_code=500, detail="Failed to upload image to storage.")
 
-        # Save to DB
+        # 7. Save to DB (in thread)
         logger.info("Attempting to save image record to DB.")
         try:
-            image_uuid = save_image_record(user_id=user_id, r2_url=r2_url, object_name=object_name)
-            logger.info(f"Result from save_image_record: {image_uuid}") # <-- ADD THIS LOG
+            image_uuid = await _run_blocking_db_op(save_image_record, user_id=user_id, r2_url=r2_url, object_name=object_name)
+            logger.info(f"Result from save_image_record: {image_uuid}")
             if not image_uuid:
-                logger.error("save_image_record returned a falsey value (e.g., None or empty UUID).") # <-- ADD THIS LOG
-                raise Exception("Database record was not created (save_image_record returned falsey).") # Updated message for clarity
+                logger.error("save_image_record returned a falsey value (e.g., None or empty UUID).")
+                raise Exception("Database record was not created (save_image_record returned falsey).")
         except Exception as e:
-            logger.error(f"DB save error during save_image_record call: {e}") # Updated message
+            logger.error(f"DB save error during save_image_record call: {e}")
             try:
-                delete_file_from_r2(object_name)
+                # Cleanup R2 object if DB save fails (in thread)
+                await _run_blocking_r2_op(delete_file_from_r2, object_name)
                 logger.info(f"Cleaned up R2 object {object_name} after DB save failure.")
             except Exception as cleanup_e:
                 logger.critical(f"Failed to clean up R2 object {object_name}: {cleanup_e}")
             raise HTTPException(status_code=500, detail="Failed to save image info to database.")
 
-        logger.info(f"Image UUID obtained for response: {image_uuid}") # <-- ADD THIS LOG
+        logger.info(f"Image UUID obtained for response: {image_uuid}")
 
         return JSONResponse(
-            content={"message": "Upload successful", "image_id": str(image_uuid), "r2_url": r2_url}, # Ensure image_id is a string for JSON
+            content={"message": "Upload successful", "image_id": str(image_uuid), "r2_url": r2_url},
             status_code=201
         )
 
@@ -262,110 +292,93 @@ async def upload_image(
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
     finally:
         if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+            await _run_blocking_os_op(os.remove, temp_file_path)
 
 
-
-# --- GET User's Images ---
+# --- GET User's Images (Made Async) ---
 @app.get("/images/me/", response_model=List[ImageRecord])
 async def get_my_images(user_id: str = Depends(auth_middleware)):
-    print(f"Getting images for user {user_id}")
-    """
-    Get all image records for the authenticated user.
-    """
+    logger.info(f"Getting images for user {user_id}")
     try:
-        images = get_all_image_records_by_user_id(user_id)
+        # Run DB operation in a separate thread
+        images = await _run_blocking_db_op(get_all_image_records_by_user_id, user_id)
         return images
     except Exception as e:
-        print(f"Error getting images for user {user_id}: {e}")
+        logger.error(f"Error getting images for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve images.")
 
-# --- GET Specific Image --- # <--- THIS SHOULD COME SECOND
+# --- GET Specific Image (Made Async) ---
 @app.get("/images/{image_id}", response_model=ImageRecord)
 async def get_image_by_id(
     image_id: str = Path(..., description="The UUID of the image to retrieve"),
     user_id: str = Depends(auth_middleware)
 ):
-    """
-    Get a specific image record by UUID for the authenticated user.
-    """
+    logger.info(f"Getting image {image_id} for user {user_id}")
     try:
-        image_record = get_image_record_by_id(user_id, image_id)
+        # Run DB operation in a separate thread
+        image_record = await _run_blocking_db_op(get_image_record_by_id, user_id, image_id)
         if image_record is None:
             raise HTTPException(status_code=404, detail="Image not found.")
         return image_record
     except HTTPException as he:
-         raise he
+        raise he
     except Exception as e:
-        print(f"Error getting image UUID {image_id} for user {user_id}: {e}")
+        logger.error(f"Error getting image UUID {image_id} for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve image.")
 
 
-# --- DELETE Specific Image ---
+# --- DELETE Specific Image (Made Async) ---
 @app.delete("/images/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_image(
-    # image_id is now a string (UUID)
     image_id: str = Path(..., description="The UUID of the image to delete"),
     user_id: str = Depends(auth_middleware)
 ):
     """
     Delete a specific image record and the corresponding file from storage for the authenticated user.
     """
-    # 1. Get the image record to retrieve the R2 object name
+    old_object_name = None
     try:
-        image_record = get_image_record_by_id(user_id, image_id)
+        # 1. Get the image record to retrieve the R2 object name (in thread)
+        image_record = await _run_blocking_db_op(get_image_record_by_id, user_id, image_id)
         if image_record is None:
             raise HTTPException(status_code=404, detail="Image not found.")
-        object_name_to_delete = image_record.get("object_name")
+        old_object_name = image_record.get("object_name")
 
-        if not object_name_to_delete:
-             # This indicates a problem with the DB schema or data if object_name is missing
-             print(f"Error: object_name missing for image UUID {image_id} for user {user_id}")
-             # Decide how to handle - cannot delete from R2. Either fail or proceed only with DB delete.
-             # Failing is safer to avoid orphan DB records if R2 deletion is expected.
-             raise HTTPException(status_code=500, detail="Image record is incomplete (missing object name). Cannot delete from storage.")
-
+        if not old_object_name:
+            logger.error(f"Error: object_name missing for image UUID {image_id} for user {user_id}")
+            raise HTTPException(status_code=500, detail="Image record is incomplete (missing object name). Cannot delete from storage.")
 
     except HTTPException as he:
-         raise he
+        raise he
     except Exception as e:
-        print(f"Error retrieving image record {image_id} for deletion for user {user_id}: {e}")
+        logger.error(f"Error retrieving image record {image_id} for deletion for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve image details for deletion.")
 
-    # 2. Delete the file from R2 storage
+    # 2. Delete the file from R2 storage (in thread)
     try:
-        # Attempt R2 deletion first. If it fails (except NoSuchKey), the request fails.
-        delete_file_from_r2(object_name_to_delete)
-        # Note: delete_file_from_r2 handles NoSuchKey internally by logging a warning and returning False/raising error based on its logic.
-        # We proceed to DB deletion regardless, but an R2 deletion error will stop the request here.
-
+        await _run_blocking_r2_op(delete_file_from_r2, old_object_name)
+        logger.info(f"Successfully deleted old R2 object: {old_object_name}")
     except Exception as e:
-        print(f"Error deleting R2 object {object_name_to_delete} for image UUID {image_id} (user {user_id}): {e}")
+        logger.error(f"Error deleting R2 object {old_object_name} for image UUID {image_id} (user {user_id}): {e}")
         raise HTTPException(status_code=500, detail="Failed to delete image file from storage.")
 
-    # 3. Delete the record from the database
+    # 3. Delete the record from the database (in thread)
     try:
-        deleted_from_db = delete_image_record_by_id(user_id, image_id)
+        deleted_from_db = await _run_blocking_db_op(delete_image_record_by_id, user_id, image_id)
         if not deleted_from_db:
-             # Should not happen if initial get_image_record_by_id succeeded, but check.
-             print(f"Warning: DB record {image_id} not found for deletion for user {user_id} after R2 attempt.")
-             raise HTTPException(status_code=404, detail="Image record not found in database.")
+            logger.warning(f"DB record {image_id} not found for deletion for user {user_id} after R2 attempt.")
+            raise HTTPException(status_code=404, detail="Image record not found in database.")
 
     except Exception as e:
-        print(f"Error deleting image record {image_id} from DB for user {user_id}: {e}")
-        # Critical: If DB deletion fails but R2 succeeded, you have an orphan R2 file.
-        # Requires manual cleanup or a background process.
+        logger.error(f"Error deleting image record {image_id} from DB for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete image record from database.")
 
-    # Return 204 No Content on successful deletion
-    return
+    return # Return 204 No Content on successful deletion
 
 
-# --- PUT/Update Specific Image ---
-# This replaces the image file and updates the storage URL/object_name in the DB.
+# --- PUT/Update Specific Image (Made Async) ---
 @app.put("/images/{image_id}", response_model=ImageRecord)
 async def update_image(
-    # image_id is now a string (UUID)
     image_id: str = Path(..., description="The UUID of the image to update"),
     file: UploadFile = File(...), # New file to replace the old one
     user_id: str = Depends(auth_middleware)
@@ -382,126 +395,123 @@ async def update_image(
     new_object_name = None
 
     try:
-        # 1. Get the existing image record to verify ownership and get old object name
-        old_image_record = get_image_record_by_id(user_id, image_id)
+        # 1. Get the existing image record to verify ownership and get old object name (in thread)
+        old_image_record = await _run_blocking_db_op(get_image_record_by_id, user_id, image_id)
         if old_image_record is None:
             raise HTTPException(status_code=404, detail="Image not found.")
         old_object_name = old_image_record.get("object_name")
 
         if not old_object_name:
-             # Cannot proceed with update if we can't identify the old R2 file to delete later
-             print(f"Error: object_name missing for image UUID {image_id} for user {user_id} during update attempt.")
-             raise HTTPException(status_code=500, detail="Image record is incomplete (missing object name). Cannot update.")
-
+            logger.error(f"Error: object_name missing for image UUID {image_id} for user {user_id} during update attempt.")
+            raise HTTPException(status_code=500, detail="Image record is incomplete (missing object name). Cannot update.")
 
         # 2. Validate and process the NEW uploaded file (similar to /upload-image/)
-        if file.size > MAX_UPLOAD_SIZE_BYTES:
+        # Asynchronously read file content
+        new_file_content = await file.read()
+
+        if len(new_file_content) > MAX_UPLOAD_SIZE_BYTES:
             raise HTTPException(status_code=413, detail=f"New file size exceeds the limit of {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f} MB.")
 
         if not file.content_type or not file.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Invalid new file type. Only images are allowed.")
 
         temp_file_path = f"temp_update_{uuid.uuid4().hex}_{file.filename}"
-        with open(temp_file_path, "wb") as f_out:
-            shutil.copyfileobj(file.file, f_out)
+        # Asynchronously write to temp file
+        async with aiofiles.open(temp_file_path, "wb") as f_out:
+            await f_out.write(new_file_content)
 
+        # Validate image (in thread)
         try:
-            img = Image.open(temp_file_path)
-            img.verify()
-            img.close()
+            img_to_verify = await _run_blocking_pillow_op(Image.open, temp_file_path)
+            await _run_blocking_pillow_op(lambda img: img.verify(), img_to_verify)
+            await _run_blocking_pillow_op(lambda img: img.close(), img_to_verify)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid or corrupted new image file.")
 
+        # Nudity detection (in thread)
         if detector:
             try:
-                detections = detector.detect(temp_file_path)
+                detections = await _run_blocking_nudity_detection(detector, temp_file_path)
                 for item in detections:
                     label = item.get("class")
                     score = item.get("score", 0)
                     if label in adult_content_labels and score > 0.2:
-                         raise HTTPException(
-                              status_code=400,
-                              detail=f"Adult content detected in new image: {label} ({score:.2f})"
-                         )
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Adult content detected in new image: {label} ({score:.2f})"
+                        )
             except Exception as e:
-                print(f"NudeNet error during update: {e}")
+                logger.error(f"NudeNet error during update: {e}")
                 raise HTTPException(status_code=500, detail="Error during nudity detection for new image.")
         else:
-            print("NudeNet detector not initialized. Skipping nudity check for new image.")
+            logger.warning("NudeNet detector not initialized. Skipping nudity check for new image.")
 
-        webp_bytes = None
+        # Image processing (in thread)
         try:
-            image = Image.open(temp_file_path)
-            processed_image = crop_image_to_aspect_ratio(image)
-            new_webp_bytes = convert_to_webp(processed_image)
-            image.close()
-            processed_image.close()
+            image_pil_for_processing = await _run_blocking_pillow_op(Image.open, temp_file_path)
+            processed_image = await _run_blocking_pillow_op(crop_image_to_aspect_ratio, image_pil_for_processing)
+            new_webp_bytes = await _run_blocking_pillow_op(convert_to_webp, processed_image)
+            
+            await _run_blocking_pillow_op(lambda img: img.close(), image_pil_for_processing)
+            await _run_blocking_pillow_op(lambda img: img.close(), processed_image)
         except Exception as e:
-            print(f"New image processing error during update: {e}")
+            logger.error(f"New image processing error during update: {e}")
             raise HTTPException(status_code=500, detail="Failed to process new image.")
 
-        # 3. Upload the NEW processed image to R2
+        # 3. Upload the NEW processed image to R2 (in thread)
         new_object_uuid = uuid.uuid4().hex
-        # Use user_id in new object name path
         new_object_name = f"uploads/{user_id}/{new_object_uuid}.webp"
         try:
             if new_webp_bytes is None:
-                 raise Exception("Processed new image bytes not available for upload.")
-            new_r2_url = upload_file_to_r2(new_webp_bytes, new_object_name)
+                raise Exception("Processed new image bytes not available for upload.")
+            new_r2_url = await _run_blocking_r2_op(upload_file_to_r2, new_webp_bytes, new_object_name)
             if not new_r2_url:
-                 raise HTTPException(status_code=500, detail="New image uploaded but URL construction failed.")
+                raise HTTPException(status_code=500, detail="New image uploaded but URL construction failed.")
         except Exception as e:
-            print(f"New R2 upload error during update: {e}")
+            logger.error(f"New R2 upload error during update: {e}")
             raise HTTPException(status_code=500, detail="Failed to upload new image to storage.")
 
-        # 4. Update the database record with the new R2 URL and object name
+        # 4. Update the database record with the new R2 URL and object name (in thread)
         try:
-            # Pass image_id as string (UUID)
-            updated_in_db = update_image_record_url_by_id(user_id, image_id, new_r2_url, new_object_name)
+            updated_in_db = await _run_blocking_db_op(update_image_record_url_by_id, user_id, image_id, new_r2_url, new_object_name)
             if not updated_in_db:
-                 print(f"Warning: DB record UUID {image_id} not found for update for user {user_id}.")
-                 # CRITICAL INCONSISTENCY: New file uploaded, but DB record wasn't updated.
-                 # Attempt to clean up the NEWLY uploaded R2 file before raising error.
-                 try:
-                      if new_object_name:
-                           delete_file_from_r2(new_object_name)
-                           print(f"Cleaned up newly uploaded R2 object {new_object_name} after DB update failure.")
-                 except Exception as cleanup_e:
-                      print(f"CRITICAL: Failed to clean up newly uploaded R2 object {new_object_name} after DB update failure: {cleanup_e}")
-                 # Raise a 404 as the record wasn't found to update (should match initial check)
-                 raise HTTPException(status_code=404, detail="Image record not found in database.")
+                logger.warning(f"DB record UUID {image_id} not found for update for user {user_id}.")
+                # CRITICAL INCONSISTENCY: New file uploaded, but DB record wasn't updated.
+                # Attempt to clean up the NEWLY uploaded R2 file before raising error.
+                try:
+                    if new_object_name:
+                        await _run_blocking_r2_op(delete_file_from_r2, new_object_name)
+                        logger.info(f"Cleaned up newly uploaded R2 object {new_object_name} after DB update failure.")
+                except Exception as cleanup_e:
+                    logger.critical(f"CRITICAL: Failed to clean up newly uploaded R2 object {new_object_name} after DB update failure: {cleanup_e}")
+                raise HTTPException(status_code=404, detail="Image record not found in database.")
         except Exception as e:
-            print(f"DB update error for image UUID {image_id} for user {user_id}: {e}")
+            logger.error(f"DB update error for image UUID {image_id} for user {user_id}: {e}")
             # CRITICAL INCONSISTENCY: New file uploaded, but DB update failed.
             # Attempt cleanup of the NEWLY uploaded R2 file.
             try:
-                 if new_object_name:
-                      delete_file_from_r2(new_object_name)
-                      print(f"Cleaned up newly uploaded R2 object {new_object_name} after DB update exception.")
+                if new_object_name:
+                    await _run_blocking_r2_op(delete_file_from_r2, new_object_name)
+                    logger.info(f"Cleaned up newly uploaded R2 object {new_object_name} after DB update exception.")
             except Exception as cleanup_e:
-                 print(f"CRITICAL: Failed to clean up newly uploaded R2 object {new_object_name} after DB update exception: {cleanup_e}")
+                logger.critical(f"CRITICAL: Failed to clean up newly uploaded R2 object {new_object_name} after DB update exception: {cleanup_e}")
             raise HTTPException(status_code=500, detail="Failed to update image record in database.")
 
 
-        # 5. Delete the OLD file from R2 storage (best effort, log if fails)
-        # We retrieved old_object_name at step 1.
+        # 5. Delete the OLD file from R2 storage (in thread - best effort, log if fails)
         if old_object_name:
             try:
-                # delete_file_from_r2 handles NoSuchKey warnings internally.
-                delete_file_from_r2(old_object_name)
-                print(f"Successfully deleted old R2 object: {old_object_name}")
+                await _run_blocking_r2_op(delete_file_from_r2, old_object_name)
+                logger.info(f"Successfully deleted old R2 object: {old_object_name}")
             except Exception as e:
-                # Log the error but don't fail the entire request
-                print(f"Warning: Failed to delete old R2 object {old_object_name} for image UUID {image_id} (user {user_id}): {e}")
+                logger.warning(f"Warning: Failed to delete old R2 object {old_object_name} for image UUID {image_id} (user {user_id}): {e}")
 
 
-        # 6. Success - Return the updated record
-        # Fetch the updated record to return the complete, current state.
-        updated_record = get_image_record_by_id(user_id, image_id)
+        # 6. Success - Return the updated record (in thread)
+        updated_record = await _run_blocking_db_op(get_image_record_by_id, user_id, image_id)
         if updated_record is None:
-             # This would be a highly unusual state if the update succeeded
-             print(f"CRITICAL: Updated record UUID {image_id} not found immediately after update for user {user_id}.")
-             raise HTTPException(status_code=500, detail="Failed to retrieve updated image record.")
+            logger.critical(f"CRITICAL: Updated record UUID {image_id} not found immediately after update for user {user_id}.")
+            raise HTTPException(status_code=500, detail="Failed to retrieve updated image record.")
 
         return updated_record
 
@@ -509,26 +519,27 @@ async def update_image(
     except HTTPException as he:
         raise he
     except Exception as e:
-        print(f"An unhandled error occurred during image update for UUID {image_id} (user {user_id}): {e}")
+        logger.error(f"An unhandled error occurred during image update for UUID {image_id} (user {user_id}): {e}")
         # Final catch-all cleanup attempt for the NEWLY uploaded file if an unexpected error occurred
         try:
-             if new_object_name:
-                  delete_file_from_r2(new_object_name)
-                  print(f"Cleaned up newly uploaded R2 object {new_object_name} after unexpected update failure.")
+            if new_object_name:
+                await _run_blocking_r2_op(delete_file_from_r2, new_object_name)
+                logger.info(f"Cleaned up newly uploaded R2 object {new_object_name} after unexpected update failure.")
         except Exception as cleanup_e:
-             print(f"CRITICAL: Failed to clean up newly uploaded R2 object {new_object_name} after unexpected update failure: {cleanup_e}")
+            logger.critical(f"CRITICAL: Failed to clean up newly uploaded R2 object {new_object_name} after unexpected update failure: {cleanup_e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred during update.")
     finally:
         if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+            await _run_blocking_os_op(os.remove, temp_file_path)
 
 
 # Optional: Add a shutdown event to close the database pool
 @app.on_event("shutdown")
 async def shutdown_event():
+    # db_pool.closeall() is likely synchronous, but acceptable at shutdown
     if db_pool:
         db_pool.closeall()
-        print("PostgreSQL connection pool closed.")
+        logger.info("PostgreSQL connection pool closed.")
 
 
 # --- Run the application ---
@@ -536,10 +547,10 @@ if __name__ == "__main__":
     ai_models_dir = os.path.join(os.path.dirname(__file__), "ai_models")
     if not os.path.exists(ai_models_dir):
         os.makedirs(ai_models_dir)
-        print(f"Created directory: {ai_models_dir}")
+        logger.info(f"Created directory: {ai_models_dir}")
 
     if not os.path.exists(settings.MODEL_PATH):
-         print(f"Error: NudeNet model file not found at {settings.MODEL_PATH}. Please download it.")
-         print("You can typically download it from the NudeNet repository or instructions.")
+        logger.error(f"Error: NudeNet model file not found at {settings.MODEL_PATH}. Please download it.")
+        logger.error("You can typically download it from the NudeNet repository or instructions.")
 
     uvicorn.run(app, host="0.0.0.0", port=8083)
