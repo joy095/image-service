@@ -7,3 +7,4 @@ python-jose[cryptography]
 python-dotenv
 psycopg2
 boto3
+aiofiles
