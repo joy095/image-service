@@ -25,6 +25,7 @@ from nudenet import NudeDetector # NudeNet is typically synchronous
 from user_models import User # Assuming User model is defined
 from config import settings
 from auth import auth_middleware
+from cors import setup_cors 
 from database import (
     save_image_record,
     db_pool, # db_pool itself doesn't need await, but operations using it do
@@ -37,11 +38,15 @@ from r2_storage import upload_file_to_r2, delete_file_from_r2
 from image_utils import convert_to_webp, crop_image_to_aspect_ratio
 
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
 
 app = FastAPI()
+
+# Configure CORS by calling the setup function from the core module
+setup_cors(app)
 
 # --- Pydantic Model for Image Records ---
 class ImageRecord(BaseModel):
