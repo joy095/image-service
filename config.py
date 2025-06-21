@@ -18,7 +18,6 @@ class Settings:
     # Strict required variables
     SECRET_KEY: bytes = base64.b64decode(must_getenv("SECRET_KEY"))
     ALGORITHM: str = must_getenv("ALGORITHM")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(must_getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
 
     DATABASE_URL: str = must_getenv("DATABASE_URL")
 
