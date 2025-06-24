@@ -286,9 +286,14 @@ async def upload_image(
         logger.info(f"Image UUID obtained for response: {image_uuid}")
 
         return JSONResponse(
-            content={"message": "Upload successful", "image_id": str(image_uuid), "r2_url": r2_url},
+            content={"image_id": str(image_uuid)},
             status_code=201
         )
+
+        # return JSONResponse(
+        #     content={"message": "Upload successful", "image_id": str(image_uuid), "r2_url": r2_url},
+        #     status_code=201
+        # )
 
     except HTTPException:
         raise
