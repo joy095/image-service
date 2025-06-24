@@ -39,13 +39,11 @@ def release_db_connection(conn):
     """Releases a connection back to the pool."""
     if conn and db_pool:
         try:
-            if conn.closed == 0 and not conn.get_transaction_status():
-                 db_pool.putconn(conn)
-            else:
-                 conn.close()
-                 logger.warning("Discarded a database connection due to open transaction or bad state.")
+            db_pool.putconn(conn)
         except Exception as e:
             logger.error(f"Failed to release connection to pool: {e}")
+            if conn:
+                conn.close()
 
 
 def save_image_record(user_id: str, r2_url: str, object_name: str) -> Optional[str]: # Return Optional[str] for UUID

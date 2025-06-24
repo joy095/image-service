@@ -47,6 +47,8 @@ def get_user_by_id(user_id: str) -> Optional[User]:
         return None
     except Exception as e:
         logger.error(f"Error fetching user {user_id}: {e}")
+        if conn:
+            conn.rollback()
         raise
     finally:
         release_db_connection(conn)
