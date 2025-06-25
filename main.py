@@ -305,6 +305,101 @@ async def upload_image(
             await _run_blocking_os_op(os.remove, temp_file_path)
 
 
+
+@app.put("/replace-image/{image_id}")
+async def replace_image(
+    image_id: str,
+    image: UploadFile = File(...),
+    user: User = Depends(auth_middleware)
+):
+    if not user or not getattr(user, "id", None):
+        logger.error("User not found or unauthorized.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_id = str(user.id)
+    logger.info(f"=== ReplaceImage START - User {user_id} ===")
+
+    # 1. Lookup old image object_name from DB
+    try:
+        old_image_record = await _run_blocking_db_op(get_image_record_by_id, user_id, image_id)
+        if not old_image_record:
+            raise HTTPException(status_code=404, detail="Image not found or unauthorized.")
+
+        object_name = old_image_record["object_name"]
+        temp_file_path = f"temp_replace_{uuid.uuid4().hex}_{image.filename}"
+
+    except Exception as e:
+        logger.error(f"DB lookup failed for image {image_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch image info.")
+
+    try:
+        # 2. Read, validate, and process new image (same as upload-image)
+        file_content = await image.read()
+
+        if len(file_content) > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds limit of {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f} MB."
+            )
+
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Invalid file type. Only images are allowed.")
+
+        async with aiofiles.open(temp_file_path, "wb") as f_out:
+            await f_out.write(file_content)
+
+        try:
+            img = await _run_blocking_pillow_op(Image.open, temp_file_path)
+            await _run_blocking_pillow_op(lambda img: img.verify(), img)
+            await _run_blocking_pillow_op(lambda img: img.close(), img)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid or corrupted image file.")
+
+        # Nudity detection
+        if detector:
+            try:
+                detections = await _run_blocking_nudity_detection(detector, temp_file_path)
+                for item in detections:
+                    label = item.get("class")
+                    score = item.get("score", 0)
+                    if label in adult_content_labels and score > 0.2:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Adult content detected: {label} ({score:.2f})"
+                        )
+            except Exception as e:
+                logger.error(f"NudeNet error: {e}")
+                raise HTTPException(status_code=500, detail="Nudity check failed.")
+
+        # Process new image
+        image_pil = await _run_blocking_pillow_op(Image.open, temp_file_path)
+        processed_image = await _run_blocking_pillow_op(crop_image_to_aspect_ratio, image_pil)
+        webp_bytes = await _run_blocking_pillow_op(convert_to_webp, processed_image)
+
+        await _run_blocking_pillow_op(lambda img: img.close(), image_pil)
+        await _run_blocking_pillow_op(lambda img: img.close(), processed_image)
+
+        # Overwrite in R2
+        await _run_blocking_r2_op(upload_file_to_r2, webp_bytes, object_name)
+
+        logger.info(f"Successfully replaced image in R2: {object_name}")
+
+        return JSONResponse(
+            content={"message": "Image replaced successfully", "image_id": image_id},
+            status_code=200
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error replacing image: {e}")
+        raise HTTPException(status_code=500, detail="Failed to replace image.")
+    finally:
+        if os.path.exists(temp_file_path):
+            await _run_blocking_os_op(os.remove, temp_file_path)
+
+
+
 # --- GET User's Images (Made Async) ---
 @app.get("/images/me/", response_model=List[ImageRecord])
 async def get_my_images(user_id: str = Depends(auth_middleware)):
