@@ -32,7 +32,8 @@ from database import (
     get_image_record_by_id,
     get_all_image_records_by_user_id,
     delete_image_record_by_id,
-    update_image_record_url_by_id
+    update_image_record_url_by_id,
+    nullify_service_image_reference
 )
 from r2_storage import upload_file_to_r2, delete_file_from_r2
 from image_utils import convert_to_webp, crop_image_to_aspect_ratio
@@ -305,6 +306,101 @@ async def upload_image(
             await _run_blocking_os_op(os.remove, temp_file_path)
 
 
+
+@app.put("/replace-image/{image_id}")
+async def replace_image(
+    image_id: str,
+    image: UploadFile = File(...),
+    user: User = Depends(auth_middleware)
+):
+    if not user or not getattr(user, "id", None):
+        logger.error("User not found or unauthorized.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_id = str(user.id)
+    logger.info(f"=== ReplaceImage START - User {user_id} ===")
+
+    # 1. Lookup old image object_name from DB
+    try:
+        old_image_record = await _run_blocking_db_op(get_image_record_by_id, user_id, image_id)
+        if not old_image_record:
+            raise HTTPException(status_code=404, detail="Image not found or unauthorized.")
+
+        object_name = old_image_record["object_name"]
+        temp_file_path = f"temp_replace_{uuid.uuid4().hex}_{image.filename}"
+
+    except Exception as e:
+        logger.error(f"DB lookup failed for image {image_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch image info.")
+
+    try:
+        # 2. Read, validate, and process new image (same as upload-image)
+        file_content = await image.read()
+
+        if len(file_content) > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File size exceeds limit of {MAX_UPLOAD_SIZE_BYTES / (1024*1024):.0f} MB."
+            )
+
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Invalid file type. Only images are allowed.")
+
+        async with aiofiles.open(temp_file_path, "wb") as f_out:
+            await f_out.write(file_content)
+
+        try:
+            img = await _run_blocking_pillow_op(Image.open, temp_file_path)
+            await _run_blocking_pillow_op(lambda img: img.verify(), img)
+            await _run_blocking_pillow_op(lambda img: img.close(), img)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid or corrupted image file.")
+
+        # Nudity detection
+        if detector:
+            try:
+                detections = await _run_blocking_nudity_detection(detector, temp_file_path)
+                for item in detections:
+                    label = item.get("class")
+                    score = item.get("score", 0)
+                    if label in adult_content_labels and score > 0.2:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Adult content detected: {label} ({score:.2f})"
+                        )
+            except Exception as e:
+                logger.error(f"NudeNet error: {e}")
+                raise HTTPException(status_code=500, detail="Nudity check failed.")
+
+        # Process new image
+        image_pil = await _run_blocking_pillow_op(Image.open, temp_file_path)
+        processed_image = await _run_blocking_pillow_op(crop_image_to_aspect_ratio, image_pil)
+        webp_bytes = await _run_blocking_pillow_op(convert_to_webp, processed_image)
+
+        await _run_blocking_pillow_op(lambda img: img.close(), image_pil)
+        await _run_blocking_pillow_op(lambda img: img.close(), processed_image)
+
+        # Overwrite in R2
+        await _run_blocking_r2_op(upload_file_to_r2, webp_bytes, object_name)
+
+        logger.info(f"Successfully replaced image in R2: {object_name}")
+
+        return JSONResponse(
+            content={"message": "Image replaced successfully", "image_id": image_id},
+            status_code=200
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error replacing image: {e}")
+        raise HTTPException(status_code=500, detail="Failed to replace image.")
+    finally:
+        if os.path.exists(temp_file_path):
+            await _run_blocking_os_op(os.remove, temp_file_path)
+
+
+
 # --- GET User's Images (Made Async) ---
 @app.get("/images/me/", response_model=List[ImageRecord])
 async def get_my_images(user_id: str = Depends(auth_middleware)):
@@ -338,52 +434,44 @@ async def get_image_by_id(
 
 
 # --- DELETE Specific Image (Made Async) ---
-@app.delete("/images/{image_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/images/{image_id}")
 async def delete_image(
-    image_id: str = Path(..., description="The UUID of the image to delete"),
-    user_id: str = Depends(auth_middleware)
+    image_id: str = Path(..., description="UUID of image to delete"),
+    user: User = Depends(auth_middleware)
 ):
-    """
-    Delete a specific image record and the corresponding file from storage for the authenticated user.
-    """
-    old_object_name = None
+    user_id = str(user.id)
+    logger.info(f"User {user_id} requested delete for image {image_id}")
+
     try:
-        # 1. Get the image record to retrieve the R2 object name (in thread)
+         # 1. Lookup image in DB
         image_record = await _run_blocking_db_op(get_image_record_by_id, user_id, image_id)
-        if image_record is None:
-            raise HTTPException(status_code=404, detail="Image not found.")
-        old_object_name = image_record.get("object_name")
+        if not image_record:
+            raise HTTPException(status_code=404, detail="Image not found or unauthorized.")
 
-        if not old_object_name:
-            logger.error(f"Error: object_name missing for image UUID {image_id} for user {user_id}")
-            raise HTTPException(status_code=500, detail="Image record is incomplete (missing object name). Cannot delete from storage.")
+        object_name = image_record["object_name"]
 
-    except HTTPException as he:
-        raise he
+        # 2. Delete from R2
+        await _run_blocking_r2_op(delete_file_from_r2, object_name)
+        logger.info(f"Deleted object from R2: {object_name}")
+
+        # 3. Nullify foreign key reference in services
+        await _run_blocking_db_op(nullify_service_image_reference, image_id)
+           
+        # 4. Delete from images table
+        deleted = await _run_blocking_db_op(delete_image_record_by_id, user_id, image_id)
+        if not deleted:
+            raise HTTPException(status_code=500, detail="Image record not deleted.")
+
+        # 5. Return 200 
+        return JSONResponse(status_code=200, content={"message": "Image deleted successfully"})
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error retrieving image record {image_id} for deletion for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve image details for deletion.")
+        logger.error(f"Failed to delete image {image_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete image.")
 
-    # 2. Delete the file from R2 storage (in thread)
-    try:
-        await _run_blocking_r2_op(delete_file_from_r2, old_object_name)
-        logger.info(f"Successfully deleted old R2 object: {old_object_name}")
-    except Exception as e:
-        logger.error(f"Error deleting R2 object {old_object_name} for image UUID {image_id} (user {user_id}): {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete image file from storage.")
 
-    # 3. Delete the record from the database (in thread)
-    try:
-        deleted_from_db = await _run_blocking_db_op(delete_image_record_by_id, user_id, image_id)
-        if not deleted_from_db:
-            logger.warning(f"DB record {image_id} not found for deletion for user {user_id} after R2 attempt.")
-            raise HTTPException(status_code=404, detail="Image record not found in database.")
-
-    except Exception as e:
-        logger.error(f"Error deleting image record {image_id} from DB for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete image record from database.")
-
-    return # Return 204 No Content on successful deletion
 
 
 # --- PUT/Update Specific Image (Made Async) ---
