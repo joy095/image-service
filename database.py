@@ -130,21 +130,23 @@ def get_all_image_records_by_user_id(user_id: str) -> List[Dict]:
 
 
 def nullify_service_image_reference(image_id: str):
-    conn = get_db_connection()
+    conn = None
     try:
+        conn = get_db_connection()
         with conn.cursor() as cursor:
             query = "UPDATE services SET image_id = NULL WHERE image_id = %s"
             cursor.execute(query, (image_id,))
+            affected_rows = cursor.rowcount
         conn.commit()
-        logger.info(f"Nullified image_id reference in services table for image {image_id}")
+        logger.info(f"Nullified {affected_rows} image_id reference(s) in services table for image {image_id}")
     except Exception as e:
         logger.error(f"Failed to nullify image reference in services: {e}")
-        conn.rollback()
+        if conn:
+            conn.rollback()
         raise
     finally:
-        release_db_connection(conn)
-
-        
+        if conn:
+            release_db_connection(conn)        
 
 def delete_image_record_by_id(user_id: str, image_id: str) -> bool: # image_id is now str (UUID)
     """Deletes an image record by UUID for a specific user."""
