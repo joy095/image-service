@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 # Pydantic model for User
 class User(BaseModel):
     id: UUID
-    username: str
     token_version: int
     email: Optional[str] = None  # Add if needed for email verification
     is_verified_email: Optional[bool] = False  # Add if needed for verification status
@@ -27,7 +26,7 @@ def get_user_by_id(user_id: str) -> Optional[User]:
         cursor = conn.cursor()
 
         query = """
-            SELECT id, username, token_version, email, is_verified_email
+            SELECT id, token_version, email, is_verified_email
             FROM users
             WHERE id = %s
         """
@@ -37,10 +36,9 @@ def get_user_by_id(user_id: str) -> Optional[User]:
         if row:
             user_data = {
                 "id": row[0],
-                "username": row[1],
-                "token_version": row[2],
-                "email": row[3],
-                "is_verified_email": row[4],
+                "token_version": row[1],
+                "email": row[2],
+                "is_verified_email": row[3],
             }
             return User(**user_data)
 
