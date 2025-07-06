@@ -185,6 +185,15 @@ async def detect_nudity(image: UploadFile = File(...)):
         if os.path.exists(temp_file_path):
             await _run_blocking_os_op(os.remove, temp_file_path)
 
+
+@app.get("/test")
+async def test(
+    user: User = Depends(auth_middleware)
+):
+    if not user or not getattr(user, "id", None):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return {"message": "ok from image service", "user_id": str(user.id)}
+
 # --- Image Upload Endpoint (Requires JWT Authentication) ---
 @app.post("/upload-image/")
 async def upload_image(
