@@ -2,3 +2,6 @@
 .env.local
 
 /__pycache__/
+
+
+identity_service.code-workspace
