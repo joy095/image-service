@@ -1,7 +1,7 @@
 # main.py
 import logging
 import uvicorn
-from fastapi import FastAPI, Depends, File, UploadFile
+from fastapi import FastAPI, Depends, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
 # Local imports
@@ -22,15 +22,14 @@ app = FastAPI(title="Image Service")
 # --- CORS Configuration ---
 setup_cors(app)
 
-# --- Include Routers ---
-# All routes from image_router will be available under the app
-app.include_router(image_router)
-
-
 # --- Health Check Endpoints ---
 @app.get("/health")
 async def health_check():
     return {"message": "ok from image service"}
+
+
+# All routes from image_router will be available under the app
+app.include_router(image_router)
 
 
 # --- Single Image Upload (can be kept here or moved to router) ---

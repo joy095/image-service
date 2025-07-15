@@ -9,6 +9,10 @@ origins = [
     "https://single-identity-service.onrender.com", 
 ]
 
+# origins = [
+#     origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:8081").split(",")
+# ]
+
 def setup_cors(app: FastAPI):
     """
     Configures the Cross-Origin Resource Sharing (CORS) middleware for the application.
@@ -22,4 +26,6 @@ def setup_cors(app: FastAPI):
         allow_credentials=True,      # Allow cookies to be included in cross-origin requests
         allow_methods=["*"],         # Allow all standard methods (GET, POST, etc.)
         allow_headers=["*"],         # Allow all headers
+        # allow_methods=["GET", "POST", "PUT", "DELETE"],  # Specify required methods
+        # allow_headers=["Authorization", "Content-Type"], # Specify required headers
     )

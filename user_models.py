@@ -20,34 +20,42 @@ class User(BaseModel):
         
 
 def get_user_by_id(user_id: str) -> Optional[User]:
+    """
+    Fetches a user from the database by their ID (user_id).
+    
+    This version correctly formats the parameter for the SQL query.
+    """
     conn = None
     try:
         conn = get_db_connection()
-        cursor = conn.cursor()
+        # Use a 'with' statement for the cursor to ensure it's always closed
+        with conn.cursor() as cursor:
+            query = """
+                SELECT id, token_version, email, is_verified_email
+                FROM users
+                WHERE id = %s
+            """
+            # The parameter MUST be a tuple, so add a trailing comma
+            cursor.execute(query, (str(user_id),)) 
+            row = cursor.fetchone()
 
-        query = """
-            SELECT id, token_version, email, is_verified_email
-            FROM users
-            WHERE id = %s
-        """
-        cursor.execute(query, (str(user_id),))  # Convert UUID to string
-        row = cursor.fetchone()
-
-        if row:
-            user_data = {
-                "id": row[0],
-                "token_version": row[1],
-                "email": row[2],
-                "is_verified_email": row[3],
-            }
-            return User(**user_data)
-
+            if row:
+                user_data = {
+                    "id": row[0],
+                    "token_version": row[1],
+                    "email": row[2],
+                    "is_verified_email": row[3],
+                }
+                return User(**user_data)
+        
         return None
     except Exception as e:
         logger.error(f"Error fetching user {user_id}: {e}")
+        # Rollback is good, but no need to commit on a SELECT query
         if conn:
             conn.rollback()
         raise
     finally:
-        release_db_connection(conn)
+        if conn:
+            release_db_connection(conn)
 
