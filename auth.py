@@ -15,7 +15,7 @@ ALGORITHM = settings.ALGORITHM
 
 
 class BodyData(BaseModel):
-    user_id: Optional[str] = Field(None, alias="user_id")
+    sub: Optional[str] = Field(None, alias="sub")
 
 
 async def auth_middleware(request: Request) -> User:
@@ -41,9 +41,9 @@ async def auth_middleware(request: Request) -> User:
             detail={"error": "Invalid or expired token"},
         )
 
-    user_id = payload.get("user_id")
-    if not user_id:
-        logger.error("Missing user_id in JWT")
+    sub = payload.get("sub")
+    if not sub:
+        logger.error("Missing sub in JWT")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "Invalid token claims"},
@@ -67,9 +67,9 @@ async def auth_middleware(request: Request) -> User:
         )
 
     # 3. Fetch user and compare token version
-    user = get_user_by_id(user_id)
+    user = get_user_by_id(sub)
     if not user:
-        logger.error(f"User not found: {user_id}")
+        logger.error(f"User not found: {sub}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "User not found"},
@@ -90,20 +90,20 @@ async def auth_middleware(request: Request) -> User:
     #         detail={"error": "Email not verified"},
     #     )
 
-    # 5. Optional: Validate user_id in body
+    # 5. Optional: Validate sub in body
     try:
         body_bytes = await request.body()
         request._receive = lambda: {"type": "http.request", "body": body_bytes}
         if body_bytes:
             parsed = BodyData.parse_raw(body_bytes)
-            if parsed.user_id and str(user.id) != parsed.user_id:
+            if parsed.sub and str(user.id) != parsed.sub:
                 logger.error("User ID in body does not match token")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail={"error": "Mismatched user ID in body"},
                 )
     except json.JSONDecodeError:
-        logger.warning("Invalid JSON body. Skipping body user_id check.")
+        logger.warning("Invalid JSON body. Skipping body sub check.")
     except Exception as e:
         logger.warning(f"Unexpected body parsing error: {e}")
 
