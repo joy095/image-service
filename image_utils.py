@@ -1,5 +1,4 @@
 from PIL import Image, features
-import pillow_avif  # Important: This import registers the AVIF plugin with Pillow
 import io
 import logging
 
