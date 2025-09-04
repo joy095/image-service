@@ -70,7 +70,7 @@ async def process_and_upload_image(image: UploadFile, user_id: str) -> Dict[str,
         await run_blocking_io(processed_image.close)
 
         # 5. Upload to R2 storage
-        object_name = f"uploads/{user_id}/{uuid.uuid4().hex}.webp"
+        object_name = f"{uuid.uuid4().hex}.webp"
         r2_url = await run_blocking_io(upload_file_to_r2, webp_bytes, object_name)
         if not r2_url:
             raise HTTPException(status_code=500, detail="Failed to upload to storage.")
