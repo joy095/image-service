@@ -3,6 +3,7 @@ import logging
 import uvicorn
 from fastapi import FastAPI, Depends, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
+import os
 
 # Local imports
 from image_router import router as image_router
@@ -16,6 +17,8 @@ from schemas import UploadResponse
 # --- App Initialization ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+os.environ["ONNX_DISABLE_CPUINFO"] = "1"  # Disable ONNX CPU info detection for Leapcell
 
 app = FastAPI(title="Image Service")
 
