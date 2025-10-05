@@ -3,7 +3,6 @@ import logging
 import uvicorn
 from fastapi import FastAPI, Depends, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
-import os
 
 # Local imports
 from image_router import router as image_router
