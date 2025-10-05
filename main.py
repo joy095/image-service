@@ -17,8 +17,6 @@ from schemas import UploadResponse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-os.environ["ONNX_DISABLE_CPUINFO"] = "1"  # Disable ONNX CPU info detection for Leapcell
-
 app = FastAPI(title="Image Service")
 
 # --- CORS Configuration ---
