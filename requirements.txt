@@ -5,9 +5,7 @@ pillow
 nudenet
 python-jose[cryptography]
 python-dotenv
-
+psycopg2
 boto3
 aiofiles
 gunicorn
-
-psycopg2-binary
